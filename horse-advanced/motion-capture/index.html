@@ -1,0 +1,453 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Gallop Mocap</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@500;600&display=swap">
+<style>
+/* Layout: one full-height stage. Horse centred with nothing behind it, quiet readout top-left, controls along the bottom. */
+:root {
+  --bg: #07090c;
+  --ink: #e8edf1;
+  --dim: #7d8a95;
+  --line: #27323b;
+  --bone: #6a8aa0;
+  --marker: #fff0cc;
+  --contact: #ffa733;
+  --font-ui: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-data: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+html { box-sizing: border-box; height: 100%; }
+html, body { background: var(--bg); }
+body {
+  box-sizing: border-box;
+  height: 100%;
+  margin: 0;
+  padding-block: 12px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  color: var(--ink);
+  font: 13px/1.45 var(--font-ui);
+}
+header { display: flex; flex-direction: column; gap: 2px; }
+h1 {
+  margin: 0;
+  font: 600 11px/1.3 var(--font-ui);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+#readout {
+  margin: 0;
+  font: 400 11px/1.5 var(--font-data);
+  color: var(--dim);
+  letter-spacing: 0.02em;
+}
+main { flex: 1; min-height: 0; position: relative; }
+#stage { display: block; width: 100%; height: 100%; }
+#feetWrap { width: 100%; max-width: 560px; margin-inline: auto; }
+#feet { display: block; width: 100%; height: 84px; }
+.bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: center;
+  gap: 8px 18px;
+}
+.group { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: center; }
+button {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--dim);
+  font: 500 11px/1 var(--font-data);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+button:hover { color: var(--ink); border-color: var(--bone); }
+button[aria-pressed="true"], button[aria-checked="true"] { color: var(--ink); border-color: var(--marker); }
+button:focus-visible { outline: 2px solid var(--contact); outline-offset: 2px; }
+#playBtn { min-width: 76px; }
+@media (max-width: 480px) {
+  button { padding: 0 10px; }
+}
+</style>
+
+<header>
+  <h1>Gallop Mocap</h1>
+  <p id="readout"></p>
+</header>
+<main>
+  <canvas id="stage" role="img" aria-label="Side view of a horse galloping, drawn as glowing motion capture markers joined by thin bones"></canvas>
+</main>
+<div id="feetWrap" hidden><canvas id="feet" role="img" aria-label="Footfall chart showing when each hoof is on the ground during one stride"></canvas></div>
+<div class="bar">
+  <div class="group"><button id="playBtn" type="button" aria-pressed="true">Pause</button></div>
+  <div class="group" role="radiogroup" aria-label="Playback speed">
+    <button type="button" role="radio" aria-checked="false" data-speed="0.25">&frac14;&times;</button>
+    <button type="button" role="radio" aria-checked="true" data-speed="0.5">&frac12;&times;</button>
+    <button type="button" role="radio" aria-checked="false" data-speed="1">1&times;</button>
+  </div>
+  <div class="group">
+    <button type="button" id="tgTrails" aria-pressed="true">Trails</button>
+    <button type="button" id="tgBones" aria-pressed="true">Bones</button>
+    <button type="button" id="tgFeet" aria-pressed="false">Footfalls</button>
+  </div>
+</div>
+
+<script>
+// MODEL-START
+// Side-view skeleton of a horse in a right-lead transverse gallop, facing right.
+// Units: shoulder-to-hip distance = 1. Y is up, the ground is y = 0.
+const TAU = Math.PI * 2;
+const VS = 2.2;       // distance travelled per stride (units); stance feet slide back at this rate
+const K_T = 0.6;      // swing tangent scale
+const STRIDE = 0.66;  // seconds per stride in real time
+
+const LEGS = [
+  // Footfall order: trailing hind, leading hind, trailing fore, leading fore. Near side = right (leading).
+  { id: 'LH', kind: 'hind', near: false, s0: 0.00, s1: 0.28 },
+  { id: 'RH', kind: 'hind', near: true,  s0: 0.13, s1: 0.43 },
+  { id: 'LF', kind: 'fore', near: false, s0: 0.36, s1: 0.62 },
+  { id: 'RF', kind: 'fore', near: true,  s0: 0.48, s1: 0.75 }
+];
+const PARAMS = {
+  hind: { L: [0.38, 0.42, 0.33, 0.15], cx: -0.55, kLift: 0.34, foldK: 0.80, bend: 1,  anchor: 'hip',      names: ['stifle', 'hock'] },
+  fore: { L: [0.32, 0.38, 0.28, 0.14], cx:  0.58, kLift: 0.32, foldK: 2.00, bend: -1, anchor: 'shoulder', names: ['elbow', 'knee'] }
+};
+
+const hv = (a) => [Math.cos(a), Math.sin(a)];
+const dirDown = (a) => [Math.sin(a), -Math.cos(a)];
+
+function ik2(A, K, a, b, bend) {
+  const dx = K[0] - A[0], dy = K[1] - A[1];
+  const d = Math.hypot(dx, dy);
+  const lo = Math.abs(a - b) + 0.005, hi = a + b - 0.002;
+  const clamped = d > hi ? d - hi : (d < lo ? lo - d : 0);
+  const dd = Math.min(hi, Math.max(lo, d));
+  const ux = dx / d, uy = dy / d;
+  const cs = (a * a + dd * dd - b * b) / (2 * a * dd);
+  const sn = Math.sqrt(Math.max(0, 1 - cs * cs));
+  const nx = -uy, ny = ux;
+  const c1 = [A[0] + a * (cs * ux + sn * nx), A[1] + a * (cs * uy + sn * ny)];
+  const c2 = [A[0] + a * (cs * ux - sn * nx), A[1] + a * (cs * uy - sn * ny)];
+  const mx = (A[0] + K[0]) / 2;
+  const mid = ((c1[0] - mx) * bend >= (c2[0] - mx) * bend) ? c1 : c2;
+  return { mid, K: [A[0] + ux * dd, A[1] + uy * dd], clamped };
+}
+
+function stanceSolve(def, A, hx) {
+  const P = PARAMS[def.kind];
+  const alpha = Math.atan2(hx - A[0], A[1]);
+  const phiC = alpha, phiP = alpha + 0.30;
+  const dp = dirDown(phiP), dc = dirDown(phiC);
+  const hoof = [hx, 0];
+  const fet = [hoof[0] - P.L[3] * dp[0], hoof[1] - P.L[3] * dp[1]];
+  const K = [fet[0] - P.L[2] * dc[0], fet[1] - P.L[2] * dc[1]];
+  return { hoof, fet, K, phiC, phiP };
+}
+
+const smooth = (t) => t * t * (3 - 2 * t);
+
+function legPose(def, p, pts, out) {
+  const P = PARAMS[def.kind];
+  const d = def.s1 - def.s0;
+  const A = pts[P.anchor];
+  const xT = P.cx + 0.5 * VS * d, xL = P.cx - 0.5 * VS * d;
+  const inStance = p >= def.s0 && p < def.s1;
+  let K, fet, hoof;
+  if (inStance) {
+    const sol = stanceSolve(def, A, xT - VS * (p - def.s0));
+    K = sol.K; fet = sol.fet; hoof = sol.hoof;
+  } else {
+    // Swing: drive the knee/hock along a lifted path between lift-off and touchdown,
+    // then fold the cannon back so the hoof trails behind it.
+    const s = (((p - def.s1) % 1 + 1) % 1) / (1 - d);
+    const A0 = bodyPts(def.s1)[P.anchor], A1 = bodyPts(def.s0)[P.anchor];
+    const e = 0.01;
+    const k0 = stanceSolve(def, A0, xL), kb = stanceSolve(def, A0, xL + VS * e);
+    const k1 = stanceSolve(def, A1, xT), ka = stanceSolve(def, A1, xT - VS * e);
+    const sc = (1 - d) * K_T / e;
+    const m0 = [(k0.K[0] - kb.K[0]) * sc, (k0.K[1] - kb.K[1]) * sc];
+    const m1 = [(ka.K[0] - k1.K[0]) * sc, (ka.K[1] - k1.K[1]) * sc];
+    const s2 = s * s, s3 = s2 * s;
+    const h00 = 2 * s3 - 3 * s2 + 1, h10 = s3 - 2 * s2 + s, h01 = -2 * s3 + 3 * s2, h11 = s3 - s2;
+    K = [h00 * k0.K[0] + h10 * m0[0] + h01 * k1.K[0] + h11 * m1[0],
+         h00 * k0.K[1] + h10 * m0[1] + h01 * k1.K[1] + h11 * m1[1]];
+    K[1] += P.kLift * Math.sin(Math.PI * Math.pow(s, 0.85));
+    const fold = Math.pow(Math.sin(Math.PI * Math.pow(s, 0.7)), 1.2);
+    const phiC = k0.phiC + (k1.phiC - k0.phiC) * smooth(s) - fold * P.foldK;
+    const phiP = phiC + 0.30 - 0.55 * fold;
+    const dc = dirDown(phiC), dp = dirDown(phiP);
+    fet = [K[0] + P.L[2] * dc[0], K[1] + P.L[2] * dc[1]];
+    hoof = [fet[0] + P.L[3] * dp[0], fet[1] + P.L[3] * dp[1]];
+  }
+  const r = ik2(A, K, P.L[0], P.L[1], P.bend);
+  const sx = r.K[0] - K[0], sy = r.K[1] - K[1];
+  out[def.id + '_' + P.names[0]] = r.mid;
+  out[def.id + '_' + P.names[1]] = r.K;
+  out[def.id + '_fetlock'] = [fet[0] + sx, fet[1] + sy];
+  out[def.id + '_hoof'] = [hoof[0] + sx, hoof[1] + sy];
+  return { stance: inStance, clamped: r.clamped };
+}
+
+function bodyPts(pIn) {
+  const p = ((pIn % 1) + 1) % 1;
+  const heave = 0.085 * (0.5 + 0.5 * Math.cos(TAU * (p - 0.88)));
+  const ext = 0.045 * Math.cos(TAU * (p - 0.9));
+  const th = 0.05 * Math.sin(TAU * (p - 0.7));
+  const thF = th * 1.3, thH = th * 0.6;
+  const C0 = [0, 1.15];
+  const rot = (pt, a, dx) => {
+    const c = Math.cos(a), s = Math.sin(a), x = pt[0] - C0[0], y = pt[1] - C0[1];
+    return [C0[0] + x * c - y * s + dx, C0[1] + x * s + y * c + heave];
+  };
+  const F = (pt) => rot(pt, thF, ext), H = (pt) => rot(pt, thH, -ext);
+  const pts = {};
+  pts.shoulder = F([0.50, 0.98]);
+  pts.withers = F([0.42, 1.38]);
+  pts.girth = F([0.30, 0.82]);
+  pts.neckBase = F([0.54, 1.30]);
+  pts.hip = H([-0.50, 1.05]);
+  pts.croup = H([-0.52, 1.40]);
+  pts.flank = H([-0.35, 0.88]);
+  pts.tailBase = H([-0.66, 1.34]);
+  pts.back = [(pts.withers[0] + pts.croup[0]) / 2, (pts.withers[1] + pts.croup[1]) / 2 + 0.01];
+
+  const na = 0.90 + 0.14 * Math.sin(TAU * (p - 0.7)) + thF;
+  const ha = -0.95 + 0.10 * Math.sin(TAU * (p - 0.8)) + thF;
+  const nb = pts.neckBase, nv = hv(na), hh = hv(ha), ev = hv(ha + 2.0);
+  pts.neckMid = [nb[0] + 0.36 * nv[0], nb[1] + 0.36 * nv[1]];
+  pts.poll = [nb[0] + 0.68 * nv[0], nb[1] + 0.68 * nv[1]];
+  pts.nose = [pts.poll[0] + 0.55 * hh[0], pts.poll[1] + 0.55 * hh[1]];
+  pts.ear = [pts.poll[0] + 0.13 * ev[0], pts.poll[1] + 0.13 * ev[1]];
+
+  let q = pts.tailBase;
+  const base = [0.55, 0.30, 0.05];
+  for (let i = 0; i < 3; i++) {
+    const a = base[i] + 0.22 * Math.sin(TAU * (p - 0.9) - 0.9 * (i + 1));
+    q = [q[0] - 0.22 * Math.cos(a), q[1] + 0.22 * Math.sin(a)];
+    pts['tail' + (i + 1)] = q;
+  }
+  return pts;
+}
+
+function pose(pIn) {
+  const p = ((pIn % 1) + 1) % 1;
+  const pts = bodyPts(p);
+  const contact = {};
+  let clamp = 0;
+  for (const def of LEGS) {
+    const r = legPose(def, p, pts, pts);
+    contact[def.id] = r.stance;
+    clamp = Math.max(clamp, r.clamped);
+  }
+  let minY = Infinity;
+  for (const k in pts) minY = Math.min(minY, pts[k][1]);
+  return { pts, contact, clamp, minY };
+}
+
+const BONES = [
+  ['withers', 'back', 'body'], ['back', 'croup', 'body'], ['croup', 'tailBase', 'body'],
+  ['tailBase', 'tail1', 'body'], ['tail1', 'tail2', 'body'], ['tail2', 'tail3', 'body'],
+  ['shoulder', 'withers', 'body'], ['shoulder', 'girth', 'body'], ['girth', 'flank', 'body'],
+  ['flank', 'hip', 'body'], ['hip', 'croup', 'body'],
+  ['withers', 'neckBase', 'body'], ['neckBase', 'neckMid', 'body'], ['neckMid', 'poll', 'body'],
+  ['poll', 'nose', 'body'], ['poll', 'ear', 'body']
+];
+for (const def of LEGS) {
+  const P = PARAMS[def.kind], g = def.near ? 'near' : 'far', id = def.id;
+  BONES.push([P.anchor, id + '_' + P.names[0], g], [id + '_' + P.names[0], id + '_' + P.names[1], g],
+             [id + '_' + P.names[1], id + '_fetlock', g], [id + '_fetlock', id + '_hoof', g]);
+}
+const NAMES = Object.keys(pose(0).pts);
+const FAR_OF = (n) => n.startsWith('LH_') || n.startsWith('LF_');
+// MODEL-END
+
+(function () {
+  const root = getComputedStyle(document.documentElement);
+  const tok = (n) => root.getPropertyValue(n).trim();
+  const C = { bg: tok('--bg'), ink: tok('--ink'), dim: tok('--dim'), line: tok('--line'), bone: tok('--bone'), marker: tok('--marker'), contact: tok('--contact') };
+
+  const cv = document.getElementById('stage'), ctx = cv.getContext('2d');
+  const feetWrap = document.getElementById('feetWrap'), feet = document.getElementById('feet'), fctx = feet.getContext('2d');
+  const readout = document.getElementById('readout');
+  const playBtn = document.getElementById('playBtn');
+  const speedBtns = Array.from(document.querySelectorAll('[data-speed]'));
+  const tgTrails = document.getElementById('tgTrails'), tgBones = document.getElementById('tgBones'), tgFeet = document.getElementById('tgFeet');
+
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let playing = !reduce, speed = 0.5, showTrails = true, showBones = true, showFeet = false;
+  let u = reduce ? 0.12 : 0;
+  let W = 0, H = 0, DPR = 1, scale = 1, oy = 0, FW = 0, FH = 0;
+  const history = [];
+  const TRAIL = 0.13; // fraction of a stride shown as trail
+
+  function size() {
+    DPR = Math.min(2, window.devicePixelRatio || 1);
+    const r = cv.getBoundingClientRect();
+    W = r.width; H = r.height;
+    cv.width = Math.max(1, Math.round(W * DPR)); cv.height = Math.max(1, Math.round(H * DPR));
+    scale = Math.min(W / 3.2, H / 2.35) * 0.94;
+    oy = H / 2 + 1.0 * scale;
+    const f = feet.getBoundingClientRect();
+    FW = f.width; FH = f.height;
+    feet.width = Math.max(1, Math.round(FW * DPR)); feet.height = Math.max(1, Math.round(FH * DPR));
+  }
+  const sx = (x) => W / 2 + x * scale;
+  const sy = (y) => oy - y * scale;
+
+  function sizeFor(n) {
+    if (n === 'hip' || n === 'shoulder') return 1.15;
+    if (n.endsWith('_hoof')) return 0.95;
+    if (n.startsWith('tail')) return 0.75;
+    if (n === 'ear') return 0.7;
+    if (n === 'back' || n === 'girth' || n === 'flank') return 0.8;
+    return 1;
+  }
+
+  function drawStage() {
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+    const P = pose(u);
+    if (playing || history.length === 0) {
+      const flat = NAMES.map((n) => P.pts[n]);
+      history.push({ u, flat });
+      while (history.length > 1 && history[0].u < u - TRAIL) history.shift();
+    }
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+
+    if (showTrails && history.length > 1) {
+      ctx.lineWidth = 1.2;
+      for (let i = 0; i < NAMES.length; i++) {
+        const far = FAR_OF(NAMES[i]);
+        for (let j = 1; j < history.length; j++) {
+          const a = history[j - 1].flat[i], b = history[j].flat[i];
+          const age = 1 - (u - history[j].u) / TRAIL;
+          ctx.strokeStyle = C.marker;
+          ctx.globalAlpha = Math.max(0, age) * Math.max(0, age) * (far ? 0.18 : 0.38);
+          ctx.beginPath(); ctx.moveTo(sx(a[0]), sy(a[1])); ctx.lineTo(sx(b[0]), sy(b[1])); ctx.stroke();
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    if (showBones) {
+      ctx.lineWidth = Math.max(1.2, scale * 0.006);
+      ctx.strokeStyle = C.bone;
+      for (const grp of ['far', 'body', 'near']) {
+        ctx.globalAlpha = grp === 'far' ? 0.38 : (grp === 'body' ? 0.8 : 0.95);
+        for (const [a, b, g] of BONES) {
+          if (g !== grp) continue;
+          const pa = P.pts[a], pb = P.pts[b];
+          ctx.beginPath(); ctx.moveTo(sx(pa[0]), sy(pa[1])); ctx.lineTo(sx(pb[0]), sy(pb[1])); ctx.stroke();
+        }
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    const r0 = Math.max(3.2, scale * 0.0125);
+    const order = NAMES.slice().sort((a, b) => (FAR_OF(b) ? 1 : 0) - (FAR_OF(a) ? 1 : 0));
+    for (const n of order) {
+      const pt = P.pts[n], x = sx(pt[0]), y = sy(pt[1]);
+      const far = FAR_OF(n);
+      const planted = n.endsWith('_hoof') && P.contact[n.slice(0, 2)];
+      const col = planted ? C.contact : C.marker;
+      const r = r0 * sizeFor(n) * (far ? 0.82 : 1);
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.globalAlpha = far ? 0.14 : 0.24;
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.arc(x, y, r * 2.8, 0, TAU); ctx.fill();
+      ctx.globalAlpha = far ? 0.2 : 0.35;
+      ctx.beginPath(); ctx.arc(x, y, r * 1.7, 0, TAU); ctx.fill();
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.globalAlpha = far ? 0.6 : 1;
+      ctx.beginPath(); ctx.arc(x, y, r, 0, TAU); ctx.fill();
+      if (planted) {
+        ctx.globalAlpha = far ? 0.5 : 0.9;
+        ctx.strokeStyle = col; ctx.lineWidth = 1.2;
+        ctx.beginPath(); ctx.arc(x, y, r * 2.1, 0, TAU); ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+    return P;
+  }
+
+  function drawFeet(p) {
+    fctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    fctx.clearRect(0, 0, FW, FH);
+    const rows = ['LH', 'RH', 'LF', 'RF'];
+    const x0 = 30, x1 = FW - 6, top = 4, rh = (FH - 18) / rows.length, bh = Math.min(12, rh - 5);
+    const X = (f) => x0 + f * (x1 - x0);
+    fctx.font = '500 10px ' + getComputedStyle(document.body).getPropertyValue('--font-data');
+    fctx.textBaseline = 'middle';
+    const pp = ((p % 1) + 1) % 1;
+    rows.forEach((id, i) => {
+      const def = LEGS.find((l) => l.id === id);
+      const cy = top + rh * i + rh / 2;
+      const on = pp >= def.s0 && pp < def.s1;
+      fctx.fillStyle = C.dim; fctx.textAlign = 'left';
+      fctx.fillText(id, 0, cy);
+      fctx.fillStyle = C.line; fctx.fillRect(x0, cy - 0.5, x1 - x0, 1);
+      fctx.fillStyle = on ? C.contact : C.bone;
+      fctx.globalAlpha = on ? 1 : (def.near ? 0.7 : 0.4);
+      fctx.fillRect(X(def.s0), cy - bh / 2, X(def.s1) - X(def.s0), bh);
+      fctx.globalAlpha = 1;
+    });
+    fctx.fillStyle = C.dim; fctx.textAlign = 'left';
+    fctx.fillText('0', x0, FH - 5);
+    fctx.textAlign = 'center'; fctx.fillText('one stride', (x0 + x1) / 2, FH - 5);
+    fctx.textAlign = 'right'; fctx.fillText('1', x1, FH - 5);
+    fctx.strokeStyle = C.marker; fctx.lineWidth = 1.5;
+    fctx.beginPath(); fctx.moveTo(X(pp), top); fctx.lineTo(X(pp), FH - 14); fctx.stroke();
+  }
+
+  function setReadout() {
+    const label = speed === 0.25 ? '¼×' : speed === 0.5 ? '½×' : '1×';
+    readout.textContent = 'Transverse gallop, right lead · ' + NAMES.length + ' markers · stride ' + STRIDE.toFixed(2) + ' s real time, playing at ' + label;
+  }
+
+  let last = performance.now();
+  function frame(now) {
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    if (playing) u += dt * speed / STRIDE;
+    drawStage();
+    if (showFeet) drawFeet(u);
+    requestAnimationFrame(frame);
+  }
+
+  playBtn.addEventListener('click', () => {
+    playing = !playing;
+    playBtn.textContent = playing ? 'Pause' : 'Play';
+    playBtn.setAttribute('aria-pressed', String(playing));
+  });
+  speedBtns.forEach((b) => b.addEventListener('click', () => {
+    speed = parseFloat(b.dataset.speed);
+    speedBtns.forEach((o) => o.setAttribute('aria-checked', String(o === b)));
+    setReadout();
+  }));
+  function toggle(btn, get, set) {
+    btn.addEventListener('click', () => { set(!get()); btn.setAttribute('aria-pressed', String(get())); });
+  }
+  toggle(tgTrails, () => showTrails, (v) => { showTrails = v; });
+  toggle(tgBones, () => showBones, (v) => { showBones = v; });
+  toggle(tgFeet, () => showFeet, (v) => { showFeet = v; feetWrap.hidden = !v; size(); });
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && e.target === document.body) { e.preventDefault(); playBtn.click(); }
+  });
+  window.addEventListener('resize', size);
+
+  if (reduce) { playBtn.textContent = 'Play'; playBtn.setAttribute('aria-pressed', 'false'); }
+  size(); setReadout();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(size);
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body></html>
