@@ -10,7 +10,7 @@ Prioritise modelling quality, convincing anatomy, deliberate geometry and polish
 
 ## Reference images
 
-Three reference images are supplied in `project/`:
+Three reference images are supplied:
 
 - **horse-1.jpg — Overall appearance / anatomy:** Primary guide for proportions, silhouette, muscle volumes and presentation. Tan/brown body, black mane/tail, dark lower legs. Do not copy its smooth shading — final must be flat-shaded low-poly.
 - **horse-3.jpg — Polygon style / density target:** Primary guide for polygon density, geometry distribution, facet size and flat-shaded appearance. This is the 2500-3500 triangle reference. Study facet distribution: higher density on head, shoulders, hips and joints, larger facets on barrel and neck.
@@ -88,7 +88,7 @@ Research https://en.wikipedia.org/wiki/The_Horse_in_Motion text and images to le
 - Extended and gathered leg positions.
 - Pronounced suspension phase.
 - Coordinated movement through the spine, torso, shoulders, hips, neck and head.
-- It can try to use `motion-capture/index.html` (`/workspace/horse-deepseek-v4.1-advanced/project/motion-capture/index.html`) to help with movement of the legs: it contains a side-view transverse gallop mocap reference with skeleton joint positions, stance/swing phases, footfall order/timings (LH/RH/LF/RF), and two-bone IK for knees/hocks. Use it as a guide for gallop leg phasing, lift/fold, and hoof placement.
+- It can try to use `motion-capture/index.html` to help with movement of the legs: it contains a side-view transverse gallop mocap reference with skeleton joint positions, stance/swing phases, footfall order/timings (LH/RH/LF/RF), and two-bone IK for knees/hocks. Use it as a guide for gallop leg phasing, lift/fold, and hoof placement.
 
 ### Rig and articulation
 
